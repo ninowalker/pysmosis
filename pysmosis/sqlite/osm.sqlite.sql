@@ -125,9 +125,13 @@ CREATE INDEX way_tags_k_idx ON way_tags(k);
 CREATE TABLE way_segments (
   id INTEGER NOT NULL,
   sequence_id INTEGER NOT NULL,
+  start_node_id INTEGER NOT NULL,
+  end_node_id INTEGER NOT NULL,
   wkt TEXT NOT NULL,
   PRIMARY KEY  (id,sequence_id)
 );
+CREATE INDEX way_segments_start_node_idx ON way_segments(start_node_id);
+CREATE INDEX way_segments_end_node_idx ON way_segments(end_node_id);
 
 --
 -- Table structure for bounds, as found in an xml import

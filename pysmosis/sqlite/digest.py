@@ -5,6 +5,7 @@ import os
 import bz2
 
 DBTEMPLATE=os.path.join(os.path.dirname(__file__), "osm.sqlite.sql")
+VERBOSE = False
 
 def create_db(sqlite_file):
     conn = sqlite3.connect(sqlite_file)
@@ -95,7 +96,7 @@ def digest_file(osmfile, sqlite_file, tag_filter=default_tag_filter):
         @classmethod
         def endElement(self,name):
             self.counter += 1
-            if self.counter % 10000 == 0:
+            if VERBOSE and self.counter % 10000 == 0:
                 print("Processed %d tags" % self.counter)
             if name == 'node':
                 if len(self.tags):
@@ -126,37 +127,45 @@ def segment_ways(conn):
     
     counter = 0
     totalways = 0
-    waycount = cur.execute("select count(id) from ways").fetchone()[0]
-    print("processing %d ways" % waycount)
+    if VERBOSE:
+        waycount = cur.execute("select count(id) from ways").fetchone()[0]
+        print("processing %d ways" % waycount)
     seq = []
     seq_num = 0
     way_id = None
+    start_node = None
+    end_node = None
     
-    for wid, lat, lng, cnt in conn.cursor().execute("select ways.id, nodes.latitude, nodes.longitude, node_refs.cnt from ways "
+    for wid, nid, lat, lng, cnt in conn.cursor().execute("select ways.id, nodes.id, nodes.latitude, nodes.longitude, node_refs.cnt from ways "
                                                "join way_nodes on ways.id = way_nodes.id "
                                                "join nodes on nodes.id = way_nodes.node_id "
                                                "join node_refs on way_nodes.node_id = node_refs.id "
                                                "order by ways.id, way_nodes.sequence_id"):
         t = None
+        end_node = nid
         if wid != way_id:
             if way_id and len(seq) > 1:
-                t = (way_id,seq_num,seq)
+                t = [way_id,seq_num,start_node,end_node, seq]
+            start_node = nid
             seq_num = 0
             way_id = wid
             seq = [(lng, lat)]
         elif cnt > 1: # intersection
             seq.append((lng, lat))
-            t = (way_id,seq_num,seq)
+            t = [way_id,seq_num,start_node,end_node,seq]
+            start_node = nid
             seq_num += 1
             seq = [(lng, lat)]
         else:
             seq.append((lng, lat))
         
         if t:
-            t = (t[0], t[1], "SRID=4326;LINESTRING(%s)" % ",".join(["%f %f" % c for c in t[2]]))
-            cur.execute("INSERT into way_segments VALUES (?,?,?)", t)
+            t[-1] = "SRID=4326;LINESTRING(%s)" % ",".join(["%f %f" % c for c in t[4]])
+            cur.execute("INSERT into way_segments VALUES (?,?,?,?,?)", t)
 
     # the  final one:
-    t = (way_id, seq_num, "SRID=4326;LINESTRING(%s)" % ",".join(["%f %f" % c for c in seq]))
-    cur.execute("INSERT into way_segments VALUES (?,?,?)", t)
+    t = (way_id, seq_num, start_node, end_node, "SRID=4326;LINESTRING(%s)" % ",".join(["%f %f" % c for c in seq]))
+    if VERBOSE:
+        cur.execute("INSERT into way_segments VALUES (?,?,?,?,?)", t)
+        print("Derived %d segments" % cur.execute("select count(*) from way_segments").fetchone())
  
