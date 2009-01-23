@@ -1,0 +1,463 @@
+"""
+This package is designed to offer FAST linear referencing tools without outside dependencies
+on other libraries (except cython).  
+
+Much of the code is a direct translation from the PostGIS repository's liblwgeom
+abstraction. One important note: Points maintain a "geo" flag, while indicates the point 
+is (or is not) a geographic coordinate.  Geographic coordinates use a spherical distance 
+calculation rather than a planar distance calculation.
+"""
+
+
+cdef extern from "math.h":
+    double asin(double d)
+    double sin(double d)
+    double cos(double d)
+    double fabs(double d)
+    double sqrt(double d)
+
+
+# Constants
+DEF __PI = 3.14159265
+DEF EARTH_RADIUS = 6370986.884258304
+
+
+cpdef double distance_earth(float x1, float y1, float x2, float y2):
+    """ Calculates the spherical distance between two geographic points."""
+    cdef double long1, lat1, long2, lat2
+    cdef double longdiff
+    cdef double sino
+    
+    long1 = -2 * (x1 / 360.0) * __PI
+    lat1 = 2 * (y1 / 360.0) * __PI
+
+    long2 = -2 * (x2 / 360.0) * __PI
+    lat2 = 2 * (y2 / 360.0) * __PI
+
+    # compute difference in longitudes - want < 180 degrees
+    longdiff = fabs(long1 - long2)
+    if longdiff > __PI:
+        longdiff = (2 * __PI) - longdiff;
+
+    sino = sqrt(sin(fabs(lat1 - lat2) / 2.) * sin(fabs(lat1 - lat2) / 2.) + \
+            cos(lat1) * cos(lat2) * sin(longdiff / 2.) * sin(longdiff / 2.))
+    if sino > 1.0: sino = 1.0
+    return 2.0 * EARTH_RADIUS * asin(sino);
+
+#def distance_earth(float x1, float y1, float x2, float y2):
+#    return cdistance_earth(x1,y1,x2,y2)
+
+    
+cdef class CPoint:
+    """ A coordinate pair.  If geo is set, distance_earth will be used in distance calculations."""
+    cdef float _x, _y
+    cdef bool geo
+
+    def __init__(self, float x, float y, bool geo):
+        self._x = x; self._y = y; self.geo = geo;
+        
+    def __str__(self):
+        return "%f,%f" % (self._x, self._y)
+    
+    def clone(self):
+        """ Return a copy of this point."""
+        return CPoint(self._x, self._y, self.geo)
+    
+    property x:
+        def __set__(self, v):
+            self._x = float(v)
+        def __get__(self):
+            return self._x
+    
+    property y:
+        def __set__(self, v):
+            self._y = float(v)
+        def __get__(self):
+            return self._y
+    
+    def is_geo(self):
+        """Is this a geographic point."""
+        return self.geo == True
+        
+        
+    
+    cpdef double distance_pt(self, CPoint p2):
+        if self.geo:
+            return distance_earth(self._x, self._y, p2._x, p2._y)
+        # else
+        cdef float hside = p2._x - self._x
+        cdef float vside = p2._y - self._y
+        return ( hside*hside + vside*vside )**0.5
+    
+
+def Point(float x, float y):
+    """Helper function to create a simple coordinate."""
+    return CPoint(x, y, False)
+
+def GPoint(float x, float y):
+    """ Helper function to return a geographic coordinate."""
+    return CPoint(x, y, True)
+
+cdef class Line:
+    """ A line as defined by two points."""
+    cdef CPoint p1, p2
+    
+    def __init__(self, CPoint p1, CPoint p2):
+        self.p1 = p1; self.p2 = p2;
+        
+    def __str__(self):
+        return "%f,%f->%f,%f" %(self.p1._x, self.p1._y, self.p2._x, self.p2._y)
+
+    cpdef double length(self):
+        """ Length of the line."""
+        return self.p1.distance_pt(self.p2)
+
+    cpdef CPoint closest_pt(self, CPoint p):
+        """Return the point on the line nearest the given point."""
+        return seg_closest_pt(self.p1, self.p2, p)
+    
+    cpdef double distance_pt(self, CPoint p):
+        """The distance from the nearest point on this line to the given point."""
+        return seg_distance_pt(self.p1, self.p2, p)
+
+    cpdef double distance_seg(self, Line s):
+        """The closest distance from this line to another line."""
+        return seg_distance_seg(self.p1, self.p2, s.p1, s.p2)
+
+cdef struct Vector2D:
+    float x, y
+
+cpdef double seg_distance_seg(CPoint a, CPoint b, CPoint c, CPoint d):
+    """The closest distance from one line to another line."""
+    # A and B are the same point 
+    if ( a._x == b._x) and (a._y == b._y):
+        return seg_distance_pt(c, d, a)
+
+    # U and V are the same point
+    if ( c._x == d._x) and (c._y == d._y):
+        return seg_distance_pt(a, b, c)
+    
+    """
+    AB and CD are line segments
+    from comp.graphics.algo
+
+    Solving the above for r and s yields
+                (Ay-Cy)(Dx-Cx)-(Ax-Cx)(Dy-Cy)
+               r = ----------------------------- (eqn 1)
+                (Bx-Ax)(Dy-Cy)-(By-Ay)(Dx-Cx)
+
+             (Ay-Cy)(Bx-Ax)-(Ax-Cx)(By-Ay)
+        s = ----------------------------- (eqn 2)
+            (Bx-Ax)(Dy-Cy)-(By-Ay)(Dx-Cx)
+    Let P be the position vector of the intersection point, then
+        P=A+r(B-A) or
+        Px=Ax+r(Bx-Ax)
+        Py=Ay+r(By-Ay)
+    By examining the values of r & s, you can also determine some other limiting conditions:
+        If 0<=r<=1 & 0<=s<=1, intersection exists
+        r<0 or r>1 or s<0 or s>1 line segments do not intersect
+        If the denominator in eqn 1 is zero, AB & CD are parallel
+        If the numerator in eqn 1 is also zero, AB & CD are collinear.
+    """
+    cdef float r_top = (a._y-c._y)*(d._x-c._x) - (a._x-c._x)*(d._y-c._y)
+    cdef float r_bot = (b._x-a._x)*(d._y-c._y) - (b._y-a._y)*(d._x-c._x)
+
+    cdef float s_top = (a._y-c._y)*(b._x-a._x) - (a._x-c._x)*(b._y-a._y)
+    cdef float s_bot = (b._x-a._x)*(d._y-c._y) - (b._y-a._y)*(d._x-c._x)
+    
+    if  r_bot==0 or s_bot == 0:
+        return min(seg_distance_pt(c, d, a),
+                   min(seg_distance_pt(c, d, b),   
+                       min(seg_distance_pt(a, b, c), seg_distance_pt(a, b, d))))
+    cdef float sv = s_top/s_bot
+    cdef float r = r_top/r_bot
+
+    if r<0 or r>1 or sv<0 or sv>1:
+        #no intersection 
+        #print "R/S", a, b, c, d, r, sv, s_top, s_bot, r_top, r_bot
+        return min(seg_distance_pt(c, d, a),
+                   min(seg_distance_pt(c, d, b),   
+                       min(seg_distance_pt(a, b, c), 
+                           seg_distance_pt(a, b, d))))
+
+    else:
+        return 0#; intersection exists 
+    
+cpdef double seg_distance_pt(CPoint a, CPoint b, CPoint p):
+    """The closest distance from a line to a point."""
+    cdef CPoint c = seg_closest_pt(a, b, p)
+    #print "Closest", c
+    return c.distance_pt(p)
+
+cpdef CPoint seg_closest_pt(CPoint a, CPoint b, CPoint p):
+    """The point from a line to another line."""
+    if a._x == b._x and b._y == a._y:
+        return a
+    
+    """
+     * otherwise, we use comp.graphics.algorithms
+     * Frequently Asked Questions method
+     *
+     *  (1)               AC dot AB
+         *         r = ---------
+         *               ||AB||^2
+     *    r has the following meaning:
+     *    r=0 P = A
+     *    r=1 P = B
+     *    r<0 P is on the backward extension of AB
+     *    r>1 P is on the forward extension of AB
+     *    0<r<1 P is interior to AB
+    """
+
+    r = ((p._x-a._x) * (b._x-a._x) + (p._y-a._y) * (b._y-a._y)) / ((b._x-a._x)*(b._x-a._x) +(b._y-a._y)*(b._y-a._y))
+    #print "r", r
+    if r<0: 
+        return a.clone()
+    if r>1: 
+        return b.clone()
+    
+    # http://www.gamedev.net/community/forums/topic.asp?topic_id=444154
+    cdef Vector2D AP
+    AP.x = p._x - a._x
+    AP.y = p._y - a._y
+
+    cdef Vector2D AB
+    AB.x = b._x - a._x
+    AB.y = b._y - a._y
+    
+    cdef float ab2 = AB.x*AB.y + AB.y*AB.y
+    cdef float ap_ab = AP.x*AB.x + AP.y*AB.y
+    cdef float t = ap_ab / ab2
+    if t < 0.0: t = 0.0
+    elif t > 1.0: t = 1.0
+    return CPoint(a._x + AB.x*t, a._y + AB.y*t, a.geo)
+
+
+cdef CPoint _to_cpoint(object arg, object geographic):
+    if type(arg) == tuple or type(arg) == list:
+        return CPoint(float(arg[0]), float(arg[1]), geographic)
+    if hasattr(arg,"x") and hasattr(arg,"y"):
+        return CPoint(float(arg.x), float(arg.y), geographic)
+    raise TypeError("unable to convert %s to a coordinate" % type(arg))
+
+cdef class LineString:
+    """A sequence of points that define a linestring."""
+    cdef object _pts
+    def __init__(self, *args, geographic=False):
+        self._pts = []
+        pts = []
+        for a in args:
+            #print type(a), type(a[0])
+            if type(a) == list or type(a) == tuple and type(a[0]) == tuple:
+                self._pts.extend([_to_cpoint(_a, geographic) for _a in a])
+            else:
+                self._pts.append(_to_cpoint(a, geographic))
+    
+    property pts:
+        def __get__(self):
+            return self._pts
+    
+    def __len__(self):
+        return len(self._pts)
+    
+    def length(self):
+        """Length of all segments comprising this line."""
+        return sum([self._pts[i-1].distance_pt(self._pts[i]) for i in range(1,len(self._pts))])
+                
+    cpdef CPoint closest_pt(self, CPoint p):
+        """The nearest point on this linestring to a given point."""
+        cdef int min_dist = -1
+        closest = None
+        for i in range(1,len(self._pts)):
+            a = self._pts[i-1]
+            b = self._pts[i]
+            c = seg_closest_pt(a, b, p)
+            d = c.distance_pt(p)
+            if d == 0:
+                return c
+            if not closest or min_dist > d:
+                min_dist = d
+                closest = c
+        return closest
+    
+    def distance_pt(self, CPoint p):
+        """The distance from the nearest point on this linestring to the given point."""
+        return self.closest_pt(p).distance_pt(p)
+    
+    def distance_to_line(self, LineString l2):
+        """The distance from this line to another."""
+        cdef int min_dist = -1
+        for i in range(1,len(self._pts)):
+            a = self._pts[i-1]
+            b = self._pts[i]
+            for j in range(1,len(l2._pts)):
+                u = l2._pts[j-1]
+                v = l2._pts[j]
+                d = seg_distance_seg(a, b, u, v)
+                #print "SDS",d
+                if d == 0:
+                    return 0
+                if min_dist == -1 or min_dist > d:
+                    min_dist = d
+        return d
+    
+    cpdef float locate_point(self, CPoint p):
+        """Find the measure [0,1] on this linestring to which the given point falls nearest."""
+        cdef CPoint nearest = None
+        cdef double mindist = -1 # min dist found
+        cdef CPoint start = None # current 
+        cdef CPoint end = None # current + 1
+        cdef int seg = -1 # closest segment index
+        cdef double dist
+
+        start = self._pts[0]
+        for i in range(1, len(self)):
+            end = self._pts[i]
+            dist = seg_distance_pt(start, end, p)
+            if i == 1 or dist < mindist:
+                mindist = dist
+                seg = i-1
+            if mindist == 0.0: 
+                break
+            
+            start = end
+        #print "-1"
+        if mindist > 0:
+            nearest = seg_closest_pt(self._pts[seg], self._pts[seg+1], p)
+        else:
+            nearest = p
+    
+        cdef float tlen = self.length() # total length
+        cdef float plen = 0 # length so far
+        
+        start = self._pts[0]
+        for i in range(0, seg):
+            end = self._pts[i+1]
+            plen = plen + start.distance_pt(end)
+            start = end
+        plen += start.distance_pt(nearest)
+        #print plen, tlen, start.distance_pt(nearest), plen/tlen
+        return plen / tlen
+    
+    cpdef LineString substring(self, float frm, float to):
+        """Returns the substring of this linestring between the two measures."""
+        cdef int state = 0 # 0=before, 1=inside        
+        cdef object dpa = [] # the output array
+        cdef object ipa = self._pts # the input array
+        cdef float length = self.length()
+        cdef float tlength = 0 # traversed length
+        cdef CPoint p1 = ipa[0]
+        cdef CPoint p2 = None
+
+        if frm > to:
+            raise ArgumentError("from is less than to")
+        # Get 'from' and 'to' lengths 
+        frm = length*frm
+        to = length*to
+
+        for i in range(0, len(ipa)-1):
+            p2 = ipa[i+1]
+            #LWDEBUGF(3 ,"Segment %d: (%g,%g,%g,%g)-(%g,%g,%g,%g)",
+            #    i, p1.x, p1.y, p1.z, p1.m, p2.x, p2.y, p2.z, p2.m);
+            # Find the length of this segment 
+            slength = p1.distance_pt(p2)
+    
+            """
+             * We are before requested start.
+            """
+            if state == 0: #  before 
+                """
+                 * Didn't reach the 'from' point,
+                 * nothing to do
+                """
+                if frm > tlength + slength:
+                    tlength += slength
+                    p1 = p2
+                    continue
+                    # goto END
+    
+                elif frm == tlength + slength:
+                    #LWDEBUG(3, "  Second point is our start");
+                    """
+                     * Second point is our start
+                    """
+                    dpa.append(p2)
+                    state=1 #;  we're inside now 
+                    
+                elif frm == tlength:
+                    #LWDEBUG(3, "  First point is our start");
+                    """
+                     * First point is our start
+                    """
+                    dpa.append(p1)
+                    """
+                     * We're inside now, but will check
+                     * 'to' point as well
+                    """
+                    state=1
+    
+                else:  # tlength < from < tlength+slength 
+                    """
+                     * Our start is between first and
+                     * second point
+                    """
+                    dseg = (frm- tlength) / slength;
+                    pt = self.interpolate_point2d(p1, p2,dseg)
+                    dpa.append(pt)
+                    """
+                     * We're inside now, but will check
+                     * 'to' point as well
+                     """
+                    state=1
+    
+            if state == 1: # inside     
+                #LWDEBUG(3, " Inside");
+                """
+                 * Didn't reach the 'end' point,
+                 * just copy second point
+                 """
+                if to > tlength + slength:
+                    dpa.append(p2)
+                    tlength += slength
+                    p1 = p2
+                    continue
+                    #goto END;
+                    
+                elif to == tlength + slength:
+                    """
+                     * 'to' point is our second point.
+                    """
+                    dpa.append(p2)
+                    break #  substring complete 
+    
+                elif to == tlength:
+                    """
+                     * 'to' point is our first point.
+                     * (should only happen if 'to' is 0)
+                    """
+                    dpa.append(p1)
+                    break#;  substring complete 
+    
+               
+                elif ( to < tlength + slength ):
+                    """
+                     * 'to' point falls on this segment
+                     * Interpolate and break.
+                    """
+                    dseg = (to - tlength) / slength
+                    pt = self.interpolate_point2d(p1, p2, dseg)
+                    dpa.append(pt)
+                    break
+                else:
+                    print "Unhandled case"
+            
+            tlength += slength
+            p1 = p2
+    
+        return LineString(dpa, geographic=ipa[0].is_geo())
+    
+    cdef interpolate_point2d(self, CPoint A, CPoint B, float F):
+        return CPoint(A.x+((B.x-A.x)*F), A.y+((B.y-A.y)*F), A.geo)
+    
+class ArgumentError(Exception):
+    pass
