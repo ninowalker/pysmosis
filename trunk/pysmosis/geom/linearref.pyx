@@ -57,7 +57,7 @@ cdef class CPoint:
         self._x = x; self._y = y; self.geo = geo;
         
     def __str__(self):
-        return "%f,%f" % (self._x, self._y)
+        return "(%f %f)" % (self._x, self._y)
     
     def clone(self):
         """ Return a copy of this point."""
@@ -127,6 +127,35 @@ cdef class Line:
 cdef struct Vector2D:
     float x, y
 
+cpdef CPoint seg_intersect_seg(CPoint a, CPoint b, CPoint c, CPoint d):
+    if ( a._x == b._x) and (a._y == b._y):
+        if seg_distance_pt(c, d, a) == 0:
+            return a.clone()
+        return None
+
+    # U and V are the same point
+    if ( c._x == d._x) and (c._y == d._y):
+        if seg_distance_pt(a, b, c) == 0:
+            return c.clone()
+        return None
+    
+    if (( a._x == c._x ) and ( a._y == c._y )) or (( a._x == d._x ) and ( a._y == d._y )):
+        return a.clone()
+    
+    if ( b._x == c._x ) and ( b._y == c._y ) or (( b._x == d._x ) and ( b._y == d._y )):
+        return b.clone()
+
+    cdef float r_bot = (b._x-a._x)*(d._y-c._y) - (b._y-a._y)*(d._x-c._x)
+    # colinear or parallel lines
+    if r_bot == 0:
+        return None    
+    
+    cdef float x, y
+    x = ((a._x*b._y - a._y*b._x)*(c._x - d._x) - (a._x - b._x)*(c._x*d._y - c._y*d._x)) / ((a._x - b._x)*(c._y - d._y) - (a._y - b._y)*(c._x - d._x))
+    y = ((a._x*b._y - a._y*b._x)*(c._y - d._y) - (a._y - b._y)*(c._x*d._y - c._y*d._x)) / ((a._x - b._x)*(c._y - d._y) - (a._y - b._y)*(c._x - d._x))
+    return CPoint(x, y, a.geo)
+    
+
 cpdef double seg_distance_seg(CPoint a, CPoint b, CPoint c, CPoint d):
     """The closest distance from one line to another line."""
     # A and B are the same point 
@@ -163,7 +192,7 @@ cpdef double seg_distance_seg(CPoint a, CPoint b, CPoint c, CPoint d):
     cdef float r_bot = (b._x-a._x)*(d._y-c._y) - (b._y-a._y)*(d._x-c._x)
 
     cdef float s_top = (a._y-c._y)*(b._x-a._x) - (a._x-c._x)*(b._y-a._y)
-    cdef float s_bot = (b._x-a._x)*(d._y-c._y) - (b._y-a._y)*(d._x-c._x)
+    cdef float s_bot = r_bot
     
     if  r_bot==0 or s_bot == 0:
         return min(seg_distance_pt(c, d, a),
@@ -182,7 +211,7 @@ cpdef double seg_distance_seg(CPoint a, CPoint b, CPoint c, CPoint d):
 
     else:
         return 0#; intersection exists 
-    
+        
 cpdef double seg_distance_pt(CPoint a, CPoint b, CPoint p):
     """The closest distance from a line to a point."""
     cdef CPoint c = seg_closest_pt(a, b, p)
@@ -232,6 +261,8 @@ cpdef CPoint seg_closest_pt(CPoint a, CPoint b, CPoint p):
     elif t > 1.0: t = 1.0
     return CPoint(a._x + AB.x*t, a._y + AB.y*t, a.geo)
 
+cdef interpolate_point2d(CPoint A, CPoint B, float F):
+        return CPoint(A.x+((B.x-A.x)*F), A.y+((B.y-A.y)*F), A.geo)
 
 cdef CPoint _to_cpoint(object arg, object geographic):
     if type(arg) == tuple or type(arg) == list:
@@ -243,8 +274,10 @@ cdef CPoint _to_cpoint(object arg, object geographic):
 cdef class LineString:
     """A sequence of points that define a linestring."""
     cdef object _pts
+    cdef object geographic # cant be a bool, because cython chokes on it.
     def __init__(self, *args, geographic=False):
         self._pts = []
+        self.geographic = bool(geographic) == True
         pts = []
         for a in args:
             #print type(a), type(a[0])
@@ -259,6 +292,13 @@ cdef class LineString:
     
     def __len__(self):
         return len(self._pts)
+    
+    def __str__(self):
+        return "(" + ",".join(map(str, self._pts)) + ")"
+    
+    property coords:
+        def __get__(self):
+            return [(c.x, c.y) for c in self._pts]
     
     def length(self):
         """Length of all segments comprising this line."""
@@ -280,11 +320,35 @@ cdef class LineString:
                 closest = c
         return closest
     
-    def distance_pt(self, CPoint p):
+    cpdef double distance_pt(self, CPoint p):
         """The distance from the nearest point on this linestring to the given point."""
         return self.closest_pt(p).distance_pt(p)
     
-    def distance_to_line(self, LineString l2):
+    cpdef CPoint closest_pt_to_line(self, LineString l2):
+        """The distance from this line to another."""
+        cdef int min_dist = -1
+        cdef CPoint closest = None
+        cdef double closest_u, closest_v
+        for i in range(1,len(self._pts)):
+            a = self._pts[i-1]
+            b = self._pts[i]
+            for j in range(1,len(l2._pts)):
+                u = l2._pts[j-1]
+                v = l2._pts[j]
+                d = seg_distance_seg(a, b, u, v)
+                if d == 0:
+                    return seg_intersect_seg(a, b, u, v)
+                if min_dist == -1 or min_dist > d:
+                    min_dist = d
+                    closest_u = seg_distance_pt(a, b, u)
+                    closest_v = seg_distance_pt(a, b, v)
+                    if seg_distance_pt(a, b, u) < seg_distance_pt(a, b, v):
+                        closest = seg_closest_pt(a, b, u)
+                    else:
+                        closest = seg_closest_pt(a, b, v)
+        return closest
+    
+    cpdef double distance_to_line(self, LineString l2):
         """The distance from this line to another."""
         cdef int min_dist = -1
         for i in range(1,len(self._pts)):
@@ -300,6 +364,7 @@ cdef class LineString:
                 if min_dist == -1 or min_dist > d:
                     min_dist = d
         return d
+
     
     cpdef float locate_point(self, CPoint p):
         """Find the measure [0,1] on this linestring to which the given point falls nearest."""
@@ -402,7 +467,7 @@ cdef class LineString:
                      * second point
                     """
                     dseg = (frm- tlength) / slength;
-                    pt = self.interpolate_point2d(p1, p2,dseg)
+                    pt = interpolate_point2d(p1, p2,dseg)
                     dpa.append(pt)
                     """
                      * We're inside now, but will check
@@ -445,7 +510,7 @@ cdef class LineString:
                      * Interpolate and break.
                     """
                     dseg = (to - tlength) / slength
-                    pt = self.interpolate_point2d(p1, p2, dseg)
+                    pt = interpolate_point2d(p1, p2, dseg)
                     dpa.append(pt)
                     break
                 else:
@@ -456,8 +521,40 @@ cdef class LineString:
     
         return LineString(dpa, geographic=ipa[0].is_geo())
     
-    cdef interpolate_point2d(self, CPoint A, CPoint B, float F):
-        return CPoint(A.x+((B.x-A.x)*F), A.y+((B.y-A.y)*F), A.geo)
+    cpdef LineString concatenate(self, LineString l2, float merge_tolerance=0):
+        """Returns true if l2 was joined or None, if the min distance is above the max distance allowed."""
+        cdef CPoint a, b, c, d
+        a = self._pts[0]
+        b = self._pts[-1]
+        c = l2._pts[0]
+        d = l2._pts[-1]
+        cdef double ac = a.distance_pt(c)
+        cdef double ad = a.distance_pt(d)
+        cdef double bc = b.distance_pt(c)
+        cdef double bd = b.distance_pt(d)
+        
+        if ac < min(ad, min(bc, bd)):
+            if ac <= merge_tolerance:
+                return LineString(self._pts, l2._pts[1:], geographic=self.geographic)
+            else:
+                return LineString(self._pts, l2._pts, geographic=self.geographic)
+
+        elif ad < min(bc, bd):
+            if ad <= merge_tolerance:
+                return LineString(self._pts[::-1], l2._pts[1:], geographic=self.geographic)
+            else:
+                return LineString(self._pts[::-1], l2._pts, geographic=self.geographic)
+        elif bc < bd:
+            if bc <= merge_tolerance:
+                return LineString(self._pts[:], l2._pts[1:], geographic=self.geographic)
+            else:
+                return LineString(self._pts[:], l2._pts, geographic=self.geographic)
+        else:
+            if bd <= merge_tolerance:
+                return LineString(self._pts[:], l2._pts[1::-1], geographic=self.geographic)
+            else:
+                return LineString(self._pts[:], l2._pts[::-1], geographic=self.geographic)
+        
     
 class ArgumentError(Exception):
     pass

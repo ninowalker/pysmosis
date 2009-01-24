@@ -64,6 +64,40 @@ def test_substring():
     assert l2.pts[-1].x == 1.5
     assert l2.pts[-1].y == 1.5
 
+def test_concatenate():
+    l1 = l.LineString([(0,0), (1,1)])
+    l2 = l.LineString([(1,1), (2,2)])
+    l3 = l1.concatenate(l2)
+    print l3
+    assert len(l3) == 3
+    l4 = l.LineString([(2,1), (2,2)])
+    l3 = l1.concatenate(l4)
+    print l3
+    assert len(l3) == 4
+    # test merge strings
+    l3 = l1.concatenate(l4, 1)
+    print l3
+    assert len(l3) == 3
+
+def test_intersect():
+    assert l.seg_intersect_seg(l.Point(0,0), l.Point(1,1), l.Point(2,2), l.Point(3,3)) == None
+    assert l.seg_intersect_seg(l.Point(0,0), l.Point(1,1), l.Point(0,0), l.Point(3,3)).x == 0
+    assert l.seg_intersect_seg(l.Point(0,0), l.Point(1,1), l.Point(0,0), l.Point(3,3)).y == 0
+    assert l.seg_intersect_seg(l.Point(0,0), l.Point(1,1), l.Point(1,0), l.Point(0,1)).y == 0.5
+    assert l.seg_intersect_seg(l.Point(0,0), l.Point(1,1), l.Point(1,0), l.Point(0,1)).x == 0.5
+    
+    assert l.seg_intersect_seg(l.Point(0,0), l.Point(1,1), l.Point(0,1), l.Point(1,0)).y == 0.5
+    assert l.seg_intersect_seg(l.Point(0,0), l.Point(1,1), l.Point(0,1), l.Point(1,0)).x == 0.5
+
+    assert l.seg_intersect_seg(l.Point(1,1), l.Point(0,0), l.Point(0,1), l.Point(1,0)).y == 0.5
+    assert l.seg_intersect_seg(l.Point(1,1), l.Point(0,0), l.Point(0,1), l.Point(1,0)).x == 0.5
+
+    l1 = l.LineString([(0,0), (1,1), (2,2)])
+    l2 = l.LineString([(0,0.5), (0, 1)])
+    assert l1.closest_pt_to_line(l2) != None
+    assert l1.closest_pt_to_line(l2).x == 0.25
+    assert l1.closest_pt_to_line(l2).y == 0.25
+
 if __name__ == '__main__':
     test_basic()
     test_linestring()
