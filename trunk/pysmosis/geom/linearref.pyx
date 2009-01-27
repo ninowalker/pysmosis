@@ -534,26 +534,30 @@ cdef class LineString:
         cdef double bd = b.distance_pt(d)
         
         if ac < min(ad, min(bc, bd)):
+            #print "Case 1", a, c, ac
             if ac <= merge_tolerance:
-                return LineString(self._pts, l2._pts[1:], geographic=self.geographic)
+                return LineString(self._pts[::-1], l2._pts[1:], geographic=self.geographic)
             else:
-                return LineString(self._pts, l2._pts, geographic=self.geographic)
+                return LineString(self._pts[::-1], l2._pts, geographic=self.geographic)
 
         elif ad < min(bc, bd):
+            #print "Case 2", a, d, ad
             if ad <= merge_tolerance:
                 return LineString(self._pts[::-1], l2._pts[1:], geographic=self.geographic)
             else:
                 return LineString(self._pts[::-1], l2._pts, geographic=self.geographic)
         elif bc < bd:
+            #print "Case 3", b, c, bc
             if bc <= merge_tolerance:
-                return LineString(self._pts[:], l2._pts[1:], geographic=self.geographic)
+                return LineString(self._pts, l2._pts[1:], geographic=self.geographic)
             else:
-                return LineString(self._pts[:], l2._pts, geographic=self.geographic)
+                return LineString(self._pts, l2._pts, geographic=self.geographic)
         else:
+            #print "Case 4", b, d, bd
             if bd <= merge_tolerance:
-                return LineString(self._pts[:], l2._pts[1::-1], geographic=self.geographic)
+                return LineString(self._pts, l2._pts[1::-1], geographic=self.geographic)
             else:
-                return LineString(self._pts[:], l2._pts[::-1], geographic=self.geographic)
+                return LineString(self._pts, l2._pts[::-1], geographic=self.geographic)
         
     
 class ArgumentError(Exception):
