@@ -50,10 +50,10 @@ cpdef double distance_earth(float x1, float y1, float x2, float y2):
     
 cdef class CPoint:
     """ A coordinate pair.  If geo is set, distance_earth will be used in distance calculations."""
-    cdef float _x, _y
+    cdef double _x, _y
     cdef bool geo
 
-    def __init__(self, float x, float y, bool geo):
+    def __init__(self, double x, double y, bool geo):
         self._x = x; self._y = y; self.geo = geo;
         
     def __str__(self):
@@ -64,14 +64,14 @@ cdef class CPoint:
         return CPoint(self._x, self._y, self.geo)
     
     property x:
-        def __set__(self, v):
-            self._x = float(v)
+        def __set__(self, double v):
+            self._x = v
         def __get__(self):
             return self._x
     
     property y:
-        def __set__(self, v):
-            self._y = float(v)
+        def __set__(self, double v):
+            self._y = v
         def __get__(self):
             return self._y
     
@@ -85,8 +85,8 @@ cdef class CPoint:
         if self.geo:
             return distance_earth(self._x, self._y, p2._x, p2._y)
         # else
-        cdef float hside = p2._x - self._x
-        cdef float vside = p2._y - self._y
+        cdef double hside = p2._x - self._x
+        cdef double vside = p2._y - self._y
         return ( hside*hside + vside*vside )**0.5
     
 
@@ -125,7 +125,7 @@ cdef class Line:
         return seg_distance_seg(self.p1, self.p2, s.p1, s.p2)
 
 cdef struct Vector2D:
-    float x, y
+    double x, y
 
 cpdef CPoint seg_intersect_seg(CPoint a, CPoint b, CPoint c, CPoint d):
     if ( a._x == b._x) and (a._y == b._y):
@@ -150,7 +150,7 @@ cpdef CPoint seg_intersect_seg(CPoint a, CPoint b, CPoint c, CPoint d):
     if r_bot == 0:
         return None    
     
-    cdef float x, y
+    cdef double x, y
     x = ((a._x*b._y - a._y*b._x)*(c._x - d._x) - (a._x - b._x)*(c._x*d._y - c._y*d._x)) / ((a._x - b._x)*(c._y - d._y) - (a._y - b._y)*(c._x - d._x))
     y = ((a._x*b._y - a._y*b._x)*(c._y - d._y) - (a._y - b._y)*(c._x*d._y - c._y*d._x)) / ((a._x - b._x)*(c._y - d._y) - (a._y - b._y)*(c._x - d._x))
     return CPoint(x, y, a.geo)
@@ -221,6 +221,7 @@ cpdef double seg_distance_pt(CPoint a, CPoint b, CPoint p):
 cpdef CPoint seg_closest_pt(CPoint a, CPoint b, CPoint p):
     """The point from a line to another line."""
     if a._x == b._x and b._y == a._y:
+        #print "Case 1"
         return a
     
     """
@@ -236,30 +237,20 @@ cpdef CPoint seg_closest_pt(CPoint a, CPoint b, CPoint p):
      *    r<0 P is on the backward extension of AB
      *    r>1 P is on the forward extension of AB
      *    0<r<1 P is interior to AB
+     *
+     * Further ref: http://local.wasp.uwa.edu.au/~pbourke/geometry/pointline/
     """
 
     r = ((p._x-a._x) * (b._x-a._x) + (p._y-a._y) * (b._y-a._y)) / ((b._x-a._x)*(b._x-a._x) +(b._y-a._y)*(b._y-a._y))
     #print "r", r
     if r<0: 
+        #print "Case 2"
         return a.clone()
     if r>1: 
+        #print "Case 3"
         return b.clone()
-    
-    # http://www.gamedev.net/community/forums/topic.asp?topic_id=444154
-    cdef Vector2D AP
-    AP.x = p._x - a._x
-    AP.y = p._y - a._y
 
-    cdef Vector2D AB
-    AB.x = b._x - a._x
-    AB.y = b._y - a._y
-    
-    cdef float ab2 = AB.x*AB.y + AB.y*AB.y
-    cdef float ap_ab = AP.x*AB.x + AP.y*AB.y
-    cdef float t = ap_ab / ab2
-    if t < 0.0: t = 0.0
-    elif t > 1.0: t = 1.0
-    return CPoint(a._x + AB.x*t, a._y + AB.y*t, a.geo)
+    return CPoint(a._x + r*(b._x - a._x), a._y + r*(b._y - a._y), a.geo)
 
 cdef interpolate_point2d(CPoint A, CPoint B, float F):
         return CPoint(A.x+((B.x-A.x)*F), A.y+((B.y-A.y)*F), A.geo)
@@ -366,7 +357,7 @@ cdef class LineString:
         return d
 
     
-    cpdef float locate_point(self, CPoint p):
+    cpdef double locate_point(self, CPoint p):
         """Find the measure [0,1] on this linestring to which the given point falls nearest."""
         cdef CPoint nearest = None
         cdef double mindist = -1 # min dist found
@@ -382,18 +373,20 @@ cdef class LineString:
             if i == 1 or dist < mindist:
                 mindist = dist
                 seg = i-1
-            if mindist == 0.0: 
+            if mindist <= 0.0: 
                 break
             
             start = end
-        #print "-1"
         if mindist > 0:
             nearest = seg_closest_pt(self._pts[seg], self._pts[seg+1], p)
         else:
             nearest = p
     
-        cdef float tlen = self.length() # total length
-        cdef float plen = 0 # length so far
+        print "Min dist", mindist, nearest, seg_closest_pt(self._pts[seg+1], self._pts[seg+2], p)
+        
+        
+        cdef double tlen = self.length() # total length
+        cdef double plen = 0 # length so far
         
         start = self._pts[0]
         for i in range(0, seg):
@@ -404,13 +397,13 @@ cdef class LineString:
         #print plen, tlen, start.distance_pt(nearest), plen/tlen
         return plen / tlen
     
-    cpdef LineString substring(self, float frm, float to):
+    cpdef LineString substring(self, double frm, double to):
         """Returns the substring of this linestring between the two measures."""
         cdef int state = 0 # 0=before, 1=inside        
         cdef object dpa = [] # the output array
         cdef object ipa = self._pts # the input array
-        cdef float length = self.length()
-        cdef float tlength = 0 # traversed length
+        cdef double length = self.length()
+        cdef double tlength = 0 # traversed length
         cdef CPoint p1 = ipa[0]
         cdef CPoint p2 = None
 
@@ -534,26 +527,26 @@ cdef class LineString:
         cdef double bd = b.distance_pt(d)
         
         if ac < min(ad, min(bc, bd)):
-            #print "Case 1", a, c, ac
+            print "Case 1", a, c, ac
             if ac <= merge_tolerance:
                 return LineString(self._pts[::-1], l2._pts[1:], geographic=self.geographic)
             else:
                 return LineString(self._pts[::-1], l2._pts, geographic=self.geographic)
 
         elif ad < min(bc, bd):
-            #print "Case 2", a, d, ad
+            print "Case 2", a, d, ad
             if ad <= merge_tolerance:
-                return LineString(self._pts[::-1], l2._pts[1:], geographic=self.geographic)
+                return LineString(l2._pts, self._pts[1:], geographic=self.geographic)
             else:
-                return LineString(self._pts[::-1], l2._pts, geographic=self.geographic)
+                return LineString(l2._pts, self._pts, geographic=self.geographic)
         elif bc < bd:
-            #print "Case 3", b, c, bc
+            print "Case 3", b, c, bc
             if bc <= merge_tolerance:
                 return LineString(self._pts, l2._pts[1:], geographic=self.geographic)
             else:
                 return LineString(self._pts, l2._pts, geographic=self.geographic)
         else:
-            #print "Case 4", b, d, bd
+            print "Case 4", b, d, bd
             if bd <= merge_tolerance:
                 return LineString(self._pts, l2._pts[1::-1], geographic=self.geographic)
             else:

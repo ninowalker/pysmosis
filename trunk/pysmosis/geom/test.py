@@ -52,6 +52,13 @@ def test_locating():
     print m
     assert m == 0.25
     
+def test_closest_pt_seg():
+    p = l.seg_closest_pt(l.GPoint(-87.667542, 41.875746), 
+                         l.GPoint(-87.671732, 41.875730), 
+                         l.GPoint(-87.6685562134,41.8757400513))
+    assert int(p.x*1000000) == int(-87.6685562271*1000000) 
+    assert int(p.y*1000000) == int(41.8757430599*1000000)
+    
 def test_substring():
     l1 = l.LineString([(0,0), (1,1), (2,2)])
     l2 = l1.substring(0, 0.5)
