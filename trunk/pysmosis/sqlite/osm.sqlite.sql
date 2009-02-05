@@ -16,7 +16,9 @@ CREATE TABLE nodes (
   "timestamp" TEXT NOT NULL
 );
 CREATE INDEX nodes_timestamp_idx ON nodes ("timestamp");
-CREATE INDEX nodes_latlng_idx ON nodes (latitude, longitude);
+--CREATE INDEX nodes_latlng_idx ON nodes (latitude, longitude);
+CREATE INDEX nodes_lat_idx ON nodes (latitude);
+CREATE INDEX nodes_lng_idx ON nodes (longitude);
 
 -- --------------------------------------------------------
 
@@ -124,14 +126,18 @@ CREATE INDEX way_tags_k_idx ON way_tags(k);
 
 CREATE TABLE way_segments (
   id INTEGER NOT NULL,
+  way_id INTEGER NOT NULL,
   sequence_id INTEGER NOT NULL,
   start_node_id INTEGER NOT NULL,
   end_node_id INTEGER NOT NULL,
   wkt TEXT NOT NULL,
-  PRIMARY KEY  (id,sequence_id)
+  left FLOAT, bottom FLOAT, right FLOAT, top FLOAT,
+  PRIMARY KEY  (id)
 );
+CREATE INDEX way_segments_way_idx ON way_segments(way_id);
 CREATE INDEX way_segments_start_node_idx ON way_segments(start_node_id);
 CREATE INDEX way_segments_end_node_idx ON way_segments(end_node_id);
+--CREATE INDEX way_segments_bbox ON ways(left, bottom, right, top);
 
 --
 -- Table structure for bounds, as found in an xml import
