@@ -183,6 +183,14 @@ class Record(object):
                                                    "=? and ".join(self._primary_key_), 
                                                    [getattr(self, f) for f in self._mappings_.values()]))
     
+    def delete(self):
+        c = connection.cursor()
+        q = "DELETE from %s where %s=?" % (self._table_, 
+                                           "=? and ".join(self._primary_key_))
+        
+        if verbose: reporter.write("Delete: %s\n" % q)
+        c.execute(q, [getattr(self, f) for f in self._primary_key_])
+    
     @classmethod
     def get(cls, **kwargs):
         return cls.query(**kwargs).fetchone()
@@ -273,6 +281,10 @@ def test():
         #print b
         assert b.id == None
         assert b.foo_id == 1
+        
+    b = Bar.get(id=2)
+    b.delete()
+    assert len(Bar.query().fetchall()) == 1
     
     #print "F bar_set:",f.bar_set.fetchall()
     #for o in Foo.join(Bar, 'id = foo_id'):
