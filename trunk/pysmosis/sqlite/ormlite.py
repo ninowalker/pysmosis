@@ -1,6 +1,10 @@
-import sqlite3 
+try:
+    import sqlite3
+except ImportError:
+    from pysqlite2 import dbapi2 as sqlite3
+
 import sys
-import json
+import simplejson as json
 import cPickle as pickle
 from cStringIO import StringIO
 
@@ -25,13 +29,6 @@ def record_factory(cls, use_dict=False):
         def _fact(cursor, row):
             return cls(**dict([(k,v) for k,v in zip(cls._mappings_.values(), row)]))
     return _fact
-
-class ForeignKey:
-    def __init__(self, this_key, other_cls, other_key, related_name):
-        self.this_key = this_key
-        self.other_cls = other_cls
-        self.other_key = other_key
-        self.related_name = related_name
 
 class FieldBase(object):
     def __init__(self, fieldname):
@@ -62,6 +59,7 @@ class ForeignKey(FieldBase):
         setattr(new_class, self.this_key[0:-3], property(_getfkey))
         setattr(self.other_cls, self.related_name, property(_getrelatedset))
         return self.this_key
+
 
 class JSONField(FieldBase):
     def contribute(self, new_cls):
@@ -168,14 +166,19 @@ class Record(object):
         return '%s(%s)' % (self.__class__.__name__, 
                            ", ".join(["%s=%s" % (f, getattr(self,f)) for f in self._mappings_.keys()]))
                     
-    def create(self):
+    def create(self, autocommit=True, get_rowid=False):
         c = connection.cursor()
+        
         q = "INSERT INTO %s(%s) VALUES (%s)" % (self._table_, 
                                                       ",".join(self._mappings_.keys()), 
                                                       ",".join(["?" for f in self._mappings_.keys()]))
         if verbose: reporter.write("Create: %s\n" % q)
+        print [getattr(self, f) for f in self._mappings_.values()]
         c.execute(q, [getattr(self, f) for f in self._mappings_.values()])
-        
+        if autocommit or get_rowid:
+            connection.commit()
+            return c.lastrowid
+            
     def save(self):
         c = connection.cursor()
         c.execute("UPDATE %s set %s=? where %s=?" % (self._table_, 
@@ -249,8 +252,8 @@ def test():
 
     open_connection(":memory:")
     c = connection.cursor()
-    c.execute("create table foo (id integer primary key, moo integer, pickle TEXT)")
-    c.execute("create table bar (id integer primary key, foo_id integer, json_array TEXT)")
+    c.execute("create table foo (id integer primary key AUTOINCREMENT, moo integer, pickle TEXT)")
+    c.execute("create table bar (id integer primary key AUTOINCREMENT, foo_id integer, json_array TEXT)")
     
     #print dir(Foo())
     f = Foo(id=1, moo=2, pickle={'a':'b'})
@@ -285,6 +288,11 @@ def test():
     b = Bar.get(id=2)
     b.delete()
     assert len(Bar.query().fetchall()) == 1
+
+    f = Foo(moo=2, pickle={'a':'b'})
+    id = f.create(get_rowid=True)
+    print id 
+    assert id == 3
     
     #print "F bar_set:",f.bar_set.fetchall()
     #for o in Foo.join(Bar, 'id = foo_id'):
