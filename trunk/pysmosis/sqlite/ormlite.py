@@ -173,7 +173,7 @@ class Record(object):
                                                       ",".join(self._mappings_.keys()), 
                                                       ",".join(["?" for f in self._mappings_.keys()]))
         if verbose: reporter.write("Create: %s\n" % q)
-        print [getattr(self, f) for f in self._mappings_.values()]
+        #print [getattr(self, f) for f in self._mappings_.values()]
         c.execute(q, [getattr(self, f) for f in self._mappings_.values()])
         if autocommit or get_rowid:
             connection.commit()
@@ -202,15 +202,18 @@ class Record(object):
     def query(cls, **kwargs):
         c = connection.cursor()
         query = ["1"]
+        args = []
         if kwargs:
             for k,v in kwargs.items():
                 if k == 'where':
                     query.append(v)
                 else:
-                    query.append("%s=%s" % (cls._mappings_[k],v))
-        q = "SELECT %s from %s where %s" % (",".join(cls._mappings_.keys()), cls._table_, " AND ".join(query))
+                    query.append("%s=?" % cls._mappings_[k])
+                    args.append(v)
+        q = "SELECT %s from %s where %s" % (",".join(cls._mappings_.keys()), cls._table_, 
+                                            " AND ".join(query))
         if verbose: reporter.write("Query: %s\n" % q)
-        c.execute(q)
+        c.execute(q, args)
         c.row_factory = record_factory(cls)
         return c
 
