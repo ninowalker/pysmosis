@@ -165,7 +165,19 @@ class Record(object):
     def __str__(self):
         return '%s(%s)' % (self.__class__.__name__, 
                            ", ".join(["%s=%s" % (f, getattr(self,f)) for f in self._mappings_.keys()]))
-                    
+
+    def __getitem__(self, key):
+        if key in self._mappings_:
+            return getattr(self, key)
+        raise KeyError(key)
+    
+    def items(self):
+        for f in self._mappings_.keys():
+            yield f, getattr(self, f)
+            
+    def keys(self):
+        return self._mappings_.keys()
+    
     def create(self, autocommit=True, get_rowid=False):
         c = connection.cursor()
         
@@ -296,6 +308,14 @@ def test():
     id = f.create(get_rowid=True)
     print id 
     assert id == 3
+    
+    fields = 0 
+    print "Iterating..."
+    for k, v in f.items():
+        fields += 1
+        print k, v
+        
+    assert fields == len(Foo._mappings_)
     
     #print "F bar_set:",f.bar_set.fetchall()
     #for o in Foo.join(Bar, 'id = foo_id'):
