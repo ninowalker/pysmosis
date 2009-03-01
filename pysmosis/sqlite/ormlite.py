@@ -8,9 +8,8 @@ import simplejson as json
 import cPickle as pickle
 from cStringIO import StringIO
 
-
 connection = None
-verbose = True
+verbose = False
 reporter = sys.stdout
 
 def open_connection(filename, **kwargs):
@@ -30,31 +29,74 @@ def record_factory(cls, use_dict=False):
             return cls(**dict([(k,v) for k,v in zip(cls._mappings_.values(), row)]))
     return _fact
 
+class NoPrimaryKeyError(Exception):
+    pass
+
 class FieldBase(object):
-    def __init__(self, fieldname):
+    def __init__(self, fieldname, default=None, index=False, notnull=False, primary_key=False):
         self.fieldname = fieldname
+        self.default = default
+        self.index = index
+        self.notnull = notnull
+        self.primary_key = primary_key
     
     def contribute(self, new_cls):
-        setattr(new_cls, self.fieldname, None)
+        setattr(new_cls, self.fieldname, self.default)
         return self.fieldname
+    
+    def lite_type(self):
+        return "TEXT"
+    
+    def lite_column_definition(self):
+        return "%s %s%s%s" % (self.fieldname, 
+                              self.lite_type(),
+                              self.default and " DEFAULT " + self.default or "", 
+                              self.notnull and " NOT NULL" or "")
 
+
+class TEXT(FieldBase):
+    pass
+    
+class INT(FieldBase):
+    def lite_type(self):
+        return "INTEGER"
+
+class FLOAT(FieldBase):
+    def lite_type(self):
+        return "FLOAT"
+
+class ID(FieldBase):
+    def __init__(self, fieldname, auto_increment=True, **kwargs):
+        kwargs['primary_key'] = True
+        super(ID, self).__init__(fieldname, **kwargs)
+        self.auto_increment = auto_increment
+        
+    def lite_type(self):
+        return "INTEGER PRIMARY KEY" + (self.auto_increment and " AUTOINCREMENT" or "")
+    
+    
 class ForeignKey(FieldBase):
-    def __init__(self, this_key, other_cls, other_key, related_name):
+    def __init__(self, this_key, other_cls, other_key, related_name, 
+                 index=True, notnull=False, litetype="INTEGER"):
         self.this_key = this_key
         self.other_cls = other_cls
         self.other_key = other_key
         self.related_name = related_name
-        super(ForeignKey, self).__init__(this_key)
+        self._lite_type = litetype
+        super(ForeignKey, self).__init__(this_key, index=index, notnull=notnull)
+
+    def lite_type(self):
+        return self._lite_type
 
     def contribute(self, new_class):
         def _getfkey(o):
             v = getattr(o, self.this_key)
             if v != None:
-                return self.other_cls.query(**{self.other_key:v})
+                return self.other_cls.objects.query(**{self.other_key:v})
             return None
         
         def _getrelatedset(o):
-            return new_class.query(**{self.this_key:getattr(o,self.other_key)})
+            return new_class.objects.query(**{self.this_key:getattr(o,self.other_key)})
         
         setattr(new_class, self.this_key[0:-3], property(_getfkey))
         setattr(self.other_cls, self.related_name, property(_getrelatedset))
@@ -119,38 +161,126 @@ class RecordBase(type):
         for obj_name, obj in attrs.items():                 
             setattr(new_class, obj_name, obj)
             
-        #fields = []
+
         mappings = {}
         for p in parents:
             mappings.update(p._mappings_)
-            #fields.extend(list(getattr(p, '_fields_')))
         fields = list(attrs['_fields_'])
-        #mappings.update(attrs['_fields_'])
+        fielddefs = []
+        primary_keys = []
         for f in fields:
-            if isinstance(f, FieldBase):
-                mappings[f.fieldname] = f.contribute(new_class)
-            else:
-                mappings[f] = f
-                setattr(new_class, f, None)
+            if not isinstance(f, FieldBase):
+                f = FieldBase(f)
+            
+            if f.primary_key:
+                primary_keys.append(f)
+            mappings[f.fieldname] = f.contribute(new_class)
+            fielddefs.append(f)
+            
+        
         setattr(new_class,'_mappings_',mappings)
+        setattr(new_class,'_fielddefs_',fielddefs)
+        if not len(primary_keys):
+            setattr(new_class,'_primary_keys_',None)
+        else:
+            setattr(new_class,'_primary_keys_',tuple(primary_keys))
 
         if '_table_' not in attrs:
             setattr(new_class, '_table_', name.lower())
-        """
-        for fkey in attrs.get('_foreign_keys_', []):
-            def _getfkey(o):
-                v = getattr(o, fkey.this_key)
-                if v != None:
-                    return fkey.other_cls.query(**{fkey.other_key:v})
-                return None
             
-            def _getrelatedset(o):
-                return new_class.query(**{fkey.this_key:getattr(o,fkey.other_key)})
+        if 'objects' not in attrs:
+            setattr(new_class, 'objects', BaseManager())
+        else:
+            setattr(new_class, 'objects', attrs['objects'])
             
-            setattr(new_class, fkey.this_key[0:-3], property(_getfkey))
-            setattr(fkey.other_cls, fkey.related_name, property(_getrelatedset))
-        """ 
+        new_class.objects.rclass = new_class
         return new_class
+
+
+class BaseManager(object):
+    def __init__(self, rclass=None):
+        # this is set by the __new__ method of class
+        self.rclass = rclass
+    
+    def createtable(self):
+        c = connection.cursor()
+        c.execute(self.tabledef())
+        c.execute(self.indicesdef())
+    
+    def tabledef(self):
+        pkeys = [p.fieldname for p in filter(lambda f: not isinstance(f, ID), self.rclass._primary_keys_)]
+        return "CREATE TABLE %s (%s%s);" % (self.rclass._table_,
+                                            ",\n".join([f.lite_column_definition() for f in self.rclass._fielddefs_]),
+                                            len(pkeys) and \
+                                            ",\nPRIMARY KEY (%s)" % ", ".join(pkeys) or "") 
+    
+    def indicesdef(self):
+        return ""
+        # TODO
+        
+    def get(self, **kwargs):
+        return self.query(**kwargs).fetchone()
+    
+    @classmethod    
+    def query(cls, **kwargs):
+        c = connection.cursor()
+        query = ["1"]
+        args = []
+        if kwargs:
+            for k,v in kwargs.items():
+                if k == 'where':
+                    query.append(v)
+                else:
+                    query.append("%s=?" % cls._mappings_[k])
+                    args.append(v)
+        q = "SELECT %s from %s where %s" % (",".join(cls._mappings_.keys()), cls._table_, 
+                                            " AND ".join(query))
+        if verbose: reporter.write("Query: %s\n" % q)
+        c.execute(q, args)
+        c.row_factory = record_factory(cls)
+        return c
+    
+    def query(self, **kwargs):
+        c = connection.cursor()
+        query = ["1"]
+        args = []
+        if kwargs:
+            for k,v in kwargs.items():
+                if k == 'where':
+                    query.append(v)
+                else:
+                    query.append("%s=?" % self.rclass._mappings_[k])
+                    args.append(v)
+        q = "SELECT %s from %s where %s" % (",".join(self.rclass._mappings_.keys()), 
+                                            self.rclass._table_, " AND ".join(query))
+        if verbose: reporter.write("Query: %s\n" % q)
+        c.execute(q, args)
+        c.row_factory = record_factory(self.rclass)
+        return c
+
+    def cursor(self):
+        c = connection.cursor()
+        c.row_factory = record_factory(self.rclass, use_dict=True)
+        return c
+        
+    def join(self, othercls, on, **kwargs):
+        c = connection.cursor()
+        query = ["1"]
+        if kwargs:
+            for k,v in kwargs:
+                if k == 'where':
+                    query.append(v)
+                else:
+                    if '__' in k:
+                        k = othercls._table_ + k[k.find('__')+2:]
+                    query.append("%s=%s" % (k,v))
+        q = "SELECT %s from %s join %s on %s where %s" % (",".join(self.rclass._mappings_.values()), 
+                                                          self.rclass._table_, " AND ".join(query))
+        if verbose: reporter.write("Query: %s\n" % q)
+        c.execute(q)
+        c.row_factory = record_factory(self.rclass)
+        return c
+
 
 class Record(object):
     __metaclass__ = RecordBase
@@ -192,95 +322,55 @@ class Record(object):
             return c.lastrowid
             
     def save(self):
+        if not len(self._primary_keys_):
+            raise NoPrimaryKeyError(self.__class__.__name__)
         c = connection.cursor()
         c.execute("UPDATE %s set %s=? where %s=?" % (self._table_, 
                                                    "=?,".join(self._mappings_.keys()),
-                                                   "=? and ".join(self._primary_key_), 
+                                                   "=? and ".join([f.fieldname for f in self._primary_keys_]), 
                                                    [getattr(self, f) for f in self._mappings_.values()]))
-    
     def delete(self):
+        if not len(self._primary_keys_):
+            raise NoPrimaryKeyError(self.__class__.__name__)
         c = connection.cursor()
         q = "DELETE from %s where %s=?" % (self._table_, 
-                                           "=? and ".join(self._primary_key_))
+                                           "=? and ".join([f.fieldname for f in self._primary_keys_]))
         
         if verbose: reporter.write("Delete: %s\n" % q)
-        c.execute(q, [getattr(self, f) for f in self._primary_key_])
-    
-    @classmethod
-    def get(cls, **kwargs):
-        return cls.query(**kwargs).fetchone()
-    
-    @classmethod    
-    def query(cls, **kwargs):
-        c = connection.cursor()
-        query = ["1"]
-        args = []
-        if kwargs:
-            for k,v in kwargs.items():
-                if k == 'where':
-                    query.append(v)
-                else:
-                    query.append("%s=?" % cls._mappings_[k])
-                    args.append(v)
-        q = "SELECT %s from %s where %s" % (",".join(cls._mappings_.keys()), cls._table_, 
-                                            " AND ".join(query))
-        if verbose: reporter.write("Query: %s\n" % q)
-        c.execute(q, args)
-        c.row_factory = record_factory(cls)
-        return c
+        c.execute(q, [getattr(self, f.fieldname) for f in self._primary_keys_])
 
-    @classmethod
-    def cursor(cls):
-        c = connection.cursor()
-        c.row_factory = record_factory(cls, use_dict=True)
-        return c
-        
-    @classmethod
-    def join(cls, othercls, on, **kwargs):
-        c = connection.cursor()
-        query = ["1"]
-        if kwargs:
-            for k,v in kwargs:
-                if k == 'where':
-                    query.append(v)
-                else:
-                    if '__' in k:
-                        k = othercls._table_ + k[k.find('__')+2:]
-                    query.append("%s=%s" % (k,v))
-        q = "SELECT %s from %s join %s on %s where %s" % (",".join(cls._mappings_.values()), cls._table_, " AND ".join(query))
-        if verbose: reporter.write("Query: %s\n" % q)
-        c.execute(q)
-        c.row_factory = record_factory(cls)
-        return c
-        
-
+            
 def test():
     class Foo(Record):
-        _fields_ = ('id','moo', PickleField('pickle'))
-        _primary_key_ = ('id',)
+        _fields_ = (ID('id'),INT('moo'), PickleField('pickle'))
+        #_primary_key_ = ('id',)
 
     class Bar(Record):
-        _fields_ = ('id', 
+        _fields_ = (ID('id'), 
                     ForeignKey('foo_id', Foo, 'id', 'bar_set'), 
-                    JSONField('json_array'))
-        _primary_key_ = ('id',)
+                    JSONField('json_array', notnull=False))
+        #_primary_key_ = ('id',)
 
     open_connection(":memory:")
     c = connection.cursor()
-    c.execute("create table foo (id integer primary key AUTOINCREMENT, moo integer, pickle TEXT)")
-    c.execute("create table bar (id integer primary key AUTOINCREMENT, foo_id integer, json_array TEXT)")
+    Foo.objects.createtable()
+    Bar.objects.createtable()
+    #c.execute("create table foo (id integer primary key, moo integer, pickle TEXT)")
+    #c.execute("create table bar (id integer primary key, foo_id integer, json_array TEXT)")
+    #c.execute("create table foo (id integer primary key AUTOINCREMENT, moo integer, pickle TEXT)")
+    #c.execute("create table bar (id integer primary key AUTOINCREMENT, foo_id integer, json_array TEXT)")
     
     #print dir(Foo())
     f = Foo(id=1, moo=2, pickle={'a':'b'})
     f.create()
-    assert 'a' in Foo.get(id=1).pickle
+    assert 'a' in Foo.objects.get(id=1).pickle
 
     Foo(id=2,cow=3, moo=2).create()
     b = Bar(id=1,foo_id=1)
     b.create()
     b = Bar(id=2,foo_id=1,json_array=[1,2,3])
     b.create()
-    for o in Foo.query():
+    for o in Foo.objects.query():
         #print "Fetch:", o
         assert o.moo == 2
         assert o.id != 3
@@ -288,26 +378,43 @@ def test():
     assert len(b.foo.fetchall()) == 1
     #print ",".join(map(str,f.bar_set.fetchall()))
     assert len(f.bar_set.fetchall()) == 2
-    b = Bar.get(id=2)
+    b = Bar.objects.get(id=2)
     assert b.foo_id == 1
     #print c.execute("select * from bar").fetchall()
     #print b.json_array, len(b.json_array), type(b.json_array)
     assert len(b.json_array) == 3
     assert sum(b.json_array) == 6
     
-    for b in Bar.cursor().execute("select foo_id from bar"):
+    for b in Bar.objects.cursor().execute("select foo_id from bar"):
         #print b
         assert b.id == None
         assert b.foo_id == 1
         
-    b = Bar.get(id=2)
+    b = Bar.objects.get(id=2)
     b.delete()
-    assert len(Bar.query().fetchall()) == 1
+    assert len(Bar.objects.query().fetchall()) == 1
 
     f = Foo(moo=2, pickle={'a':'b'})
     id = f.create(get_rowid=True)
     print id 
     assert id == 3
+    
+    class Dud(Record):
+        _fields_ = (TEXT('a',primary_key=True),TEXT('b',primary_key=True))
+    
+    print Bar.objects.tabledef()
+    print Dud.objects.tabledef()
+    
+    Dud.objects.createtable()
+    
+    Dud(a="a",b="b").create()
+    try:
+        Dud(a="a",b="b").create()
+        assert False
+    except:
+        assert True
+        
+    print "Passed"
     
     fields = 0 
     print "Iterating..."
