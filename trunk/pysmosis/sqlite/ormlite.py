@@ -7,6 +7,7 @@ import sys
 import simplejson as json
 import cPickle as pickle
 from cStringIO import StringIO
+import pdb
 
 connection = None
 verbose = False
@@ -121,7 +122,7 @@ class JSONField(FieldBase):
                 v = json.loads(v)
                 setattr(o, "__%s_cache" % self.fieldname, v)
             return v
-        
+                    
         setattr(new_cls, "__%s_cache" % self.fieldname, None)
         setattr(new_cls, "__%s_raw" % self.fieldname, None)
         setattr(new_cls, self.fieldname, property(_get,_set))
@@ -205,7 +206,8 @@ class BaseManager(object):
     def createtable(self):
         c = connection.cursor()
         c.execute(self.tabledef())
-        c.execute(self.indicesdef())
+        c.executescript(self.indicesdef())
+        connection.commit()
     
     def tabledef(self):
         pkeys = [p.fieldname for p in filter(lambda f: not isinstance(f, ID), self.rclass._primary_keys_)]
@@ -215,8 +217,15 @@ class BaseManager(object):
                                             ",\nPRIMARY KEY (%s)" % ", ".join(pkeys) or "") 
     
     def indicesdef(self):
-        return ""
-        # TODO
+        fields = [p for p in filter(lambda f: f.index and not f.primary_key, 
+                                    self.rclass._fielddefs_)]
+        ind = []
+        for f in fields:
+            ind.append("CREATE INDEX %s_%s_indx ON %s(%s);" % (self.rclass._table_,
+                                                              f.fieldname,
+                                                              self.rclass._table_,
+                                                              f.fieldname)) 
+        return "\n".join(ind)
         
     def get(self, **kwargs):
         return self.query(**kwargs).fetchone()
@@ -310,7 +319,7 @@ class Record(object):
     
     def create(self, autocommit=True, get_rowid=False):
         c = connection.cursor()
-        
+        #pdb.set_trace()
         q = "INSERT INTO %s(%s) VALUES (%s)" % (self._table_, 
                                                       ",".join(self._mappings_.keys()), 
                                                       ",".join(["?" for f in self._mappings_.keys()]))

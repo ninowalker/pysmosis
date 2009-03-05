@@ -3,50 +3,20 @@ import xml.sax
 import sqlite3
 import os
 import bz2
-
-DBTEMPLATE=os.path.join(os.path.dirname(__file__), "osm.sqlite.sql")
-VERBOSE = False
-
-def create_db(sqlite_file):
-    conn = sqlite3.connect(sqlite_file)
-    c = conn.cursor()
-    dbtemplate = open(DBTEMPLATE).read()
-    c.executescript(dbtemplate)
-    return conn
-
-def open_db(sqlite_file):
-    return sqlite3.connect(sqlite_file)
+from ORM import Way, WaySegment, Node
     
-def default_tag_filter(k, v, is_node, is_way):
-    # return a tuple of (key, value) or None, if you want to ignore the tag
-    return k, v
-
-def default_way_filter(tags):
-    return True
-
-def digest_file(osmfile, sqlite_file, 
-                accept_way=default_way_filter, 
-                accept_tag=default_tag_filter, 
-                reporter=None):
-    if os.path.exists(sqlite_file):
-        conn = open_db(sqlite_file)
-    else:
-        conn = create_db(sqlite_file)
+def load_osmfile(conn, osmfile, 
+              accept_way=lambda way: 'highway' in way.tags,
+              accept_tag=lambda k,v: k.startswith('tiger') and (None,None) or (k,v),
+              reporter=None):
         
     cur = conn.cursor()
     cur.execute('PRAGMA synchronous=OFF;')
     
     class FastOSMHandler(xml.sax.ContentHandler):
-        id = None
-        way = False
-        node = True
-        waytype = None
-        wayrefs = None
-        user = None 
-        visible = False
-        timestamp = None
+        object = None
+        is_way = False
         counter = 0
-        tags = {}
         
         @classmethod
         def setDocumentLocator(self,loc):
@@ -63,43 +33,33 @@ def digest_file(osmfile, sqlite_file,
         @classmethod
         def characters(self, chars):
             pass
-            
+                
         @classmethod
         def startElement(self, name, attrs):
-            if name=='bounds':
-                cur.execute("INSERT into bounds VALUES (?,?,?,?)", (attrs['minlat'],attrs['minlon'],
-                                                             attrs['maxlat'],attrs['maxlon']))
-                conn.commit()
+            if name=='node':
+                self.object = Node(id=int(attrs['id']),
+                                   lat=float(attrs['lat']),
+                                   lon=float(attrs['lon']),
+                                   tags={},
+                                   refcount=0)
+                self.is_way = False
                 return
-            elif name=='node':
-                self.id = int(attrs['id'])
-                self.tags = {}
-                self.node = True
-                cur.execute("INSERT into nodes VALUES (?,?,?,?,?,?)", (self.id,
-                                                                       float(attrs['lat']),
-                                                                       float(attrs['lon']),
-                                                                       attrs.get('user'),
-                                                                       attrs.get('visible')=='true',
-                                                                       attrs['timestamp']))
-                
-                cur.execute("INSERT into node_refs VALUES (?,?)", (self.id, 0))
-                return
+            
             elif name=='tag':
-                r = accept_tag(attrs['k'],attrs['v'], self.node, self.way)
-                if r:
-                    self.tags[r[0]] = r[1]
+                k,v = accept_tag(attrs['k'],attrs['v'])
+                #print k,v
+                if k:
+                    self.object.tags[k] = v
                 return
-            elif name=='way':
-                self.id = int(attrs['id'])
-                self.user = attrs.get('user')
-                self.visible = attrs.get('visible')=='true'
-                self.timestamp = attrs['timestamp']
-                self.wayrefs = []
-                self.way = True
-                self.tags = {}
 
-            elif self.way and name=='nd':
-                self.wayrefs.append(attrs['ref'])
+            elif name=='way':
+                self.object = Way(id=int(attrs['id']), nds=[], geom=[], tags={})
+                self.is_way = True
+                return 
+            
+            elif self.is_way and name=='nd':
+                self.object.nds.append(attrs['ref'])
+                return
             
         @classmethod
         def endElement(self,name):
@@ -107,43 +67,26 @@ def digest_file(osmfile, sqlite_file,
             if reporter and self.counter % 10000 == 0:
                 reporter.write("Processed %d tags\n" % self.counter)
             if name == 'node':
-                if len(self.tags):
-                    cur.executemany('INSERT INTO node_tags VALUES (?,?,?)', [(self.id,k,v) for k,v in self.tags.items()])
-                    self.tags = {}
-                conn.commit()
-                self.node = False
-                return
-            elif name == 'way':
-                #if self.id == 16752188:
-                #    print self.tags
-                #    #assert False
-                if not accept_way(self.tags):
-                    #print "Skiping way", self.tags
-                    self.way = False
-                    self.tags = {}
-                    return
-                cur.execute("INSERT into ways VALUES (?,?,?,?)", (self.id,
-                                                                  self.user,
-                                                                  self.visible,
-                                                                  self.timestamp))
-                #if self.id == 16752188:
-                #    print "Crap..."
-                 #   assert False
-                if len(self.tags):
-                    cur.executemany('INSERT INTO way_tags VALUES (?,?,?)', [(self.id,k,v) for k,v in self.tags.items()])
-                 #   self.tags = {}
-                if len(self.wayrefs):
-                    cur.executemany('INSERT INTO way_nodes VALUES (?,?,?)', 
-                                    [(self.id,nd,i) for i,nd in enumerate(self.wayrefs)])
-                    cur.execute('UPDATE node_refs SET cnt = cnt + 1 WHERE id IN (%s)' % ",".join(self.wayrefs))
-                conn.commit()
-                self.way = False
+                self.object.tags = self.object.tags 
+                self.object.create(autocommit=True)
+                self.object = None
                 return
 
+            elif name == 'way':
+                if accept_way(self.object):
+                    #print self.object._fields_
+                    self.object.tags = self.object.tags 
+                    self.object.create(autocommit=False)
+                    cur.execute("UPDATE nodes set refcount = refcount + 1 where id in (%s)" % ",".join(self.object.nds))                        
+                    conn.commit()
+                self.object = None
+                return
+            
     if type(osmfile) == str and osmfile.endswith("bz2"):
         osmfile = bz2.BZ2File(osmfile,"r")
     xml.sax.parse(osmfile, FastOSMHandler)
     return conn
+
     
 def segment_ways(conn, reporter=None):
     cur = conn.cursor()
@@ -151,7 +94,7 @@ def segment_ways(conn, reporter=None):
     counter = 0
     totalways = 0
     if reporter:
-        waycount = cur.execute("select count(id) from ways").fetchone()[0]
+        waycount = cur.execute("select count(id) from way").fetchone()[0]
         reporter.write("Segmenting %d ways\n" % waycount)
     seq = []
     seq_num = 0
