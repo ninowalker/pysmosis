@@ -1,0 +1,1 @@
+This project provides pure Python tools for manipulating [Open Street Map](http://www.openstreetmap.org/) data sources.
